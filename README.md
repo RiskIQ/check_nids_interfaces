@@ -26,6 +26,13 @@ issue. Here's an example:
     $ check_nids_interfaces -p 80/tcp -w 7 -c 6 eth6 eth7 eth8 eth9 eth10 eth11 eth12 eth13 
     INTERFACES OK - 8 interface(s) with traffic (eth6 eth7 eth8 eth9 eth10 eth11 eth12 eth13), 0 without (-)
 
+This plugin is also designed so that it may be run manually using the
+`-v' option for verbose output. This makes use of colorized terminal output
+using the [bash_colors][bc] library and is useful when spot checking and
+troubleshooting traffic health interactively.
+
+![Verbose invocation](doc/images/image01.png)
+
 ## Requirements
 
 - Bash (version 4)
@@ -73,11 +80,6 @@ This can be done using the `-d` option, as in `-d 3`. Be aware that while this
 increases the possibility of receiving the desired traffic, it also compounds
 the time required for the plugin to complete execution, thus increasing the
 chance that the plugin could exceed its allotted execution time.
-
-Finally, this plugin is also designed so that it may be run manually using the
-`-v' option for verbose output. This makes use of colorized terminal output
-using the [bash_colors][bc] library and is useful when spot checking and
-troubleshooting monitoring health interactively.
 
 [bc]: https://github.com/maxtsepkov/bash_colors
 
