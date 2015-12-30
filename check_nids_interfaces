@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+#
+# https://github.com/RiskIQ/check_nids_interfaces
+#
+# Author: Darren Spruell (dspruell@riskiq.net)
+#
+# Test NIDS sensor network interfaces for specified traffic to see if the
+# sensor is receiving monitored flows.
+
+set -e
+PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin
+
+# Service name to return in plugin check output for Nagios
+SERVICENAME="INTERFACES"
+# Default pause interval in seconds for capture process to snag traffic
+CAPTURE_DURATION=1
+# Array of status codes from Nagios plugin API
+declare -A STATUS_CODES=([OK]=0 [WARNING]=1 [CRITICAL]=2 [UNKNOWN]=3)
+
+# Load ANSI color routines; relative path searches in PATH
+source bash_colors
+
+do_cleanup() {
+    rm -f /tmp/pcap-????????
+}
+
+trap 'do_cleanup; exit' ERR EXIT QUIT TERM
+trap 'printf "\n%s\n" Exiting...; do_cleanup; exit' INT
+
+# Return BPF expression to use when testing interface for receipt of "target"
+# traffic that will determine whether traffic is transmitting to sensor.
+# Explicitly specified BPF is returned as is; "portspecs" are translated to
+# simple expressions, and anything else is an error.
+get_bpf() {
+    if [ -n "$BPF" ]; then
+        FILTER="$BPF"
+    elif [ -n "$PORTSPEC" ]; then
+        if ! echo "$PORTSPEC" | egrep -q '[0-9]+/[a-z]+'; then
+            print_err "given portspec not required format ($PORTSPEC)"
+            exit ${STATUS_CODES[UNKNOWN]}
+        fi
+        FILTER="$(echo "$PORTSPEC" | awk -F/ '{print $2 " and port " $1}')"
+    else
+        print_err "BPF or monitor portspec must be specified"
+        exit ${STATUS_CODES[UNKNOWN]}
+    fi
+    print_verbose "$(clr_white "Filtering using BPF: $(clr_escape "$FILTER" $CLR_BOLD $CLR_CYAN)")"
+    echo "$FILTER"
+}
+
+usage()
+{
+    cat <<-EOF
+	USAGE: $(basename "$0") [options] INTERFACE [...]
+
+	Test specified interfaces for receipt of key network traffic.
+
+	Options:
+	  -p PORTSPEC:
+	       Use given PORTSPEC to derive the BPF expression to verify receipt
+	       of monitored traffic on interfaces. PORTSPEC should be specified
+	       in the format 'port/proto', e.g. 80/tcp. Either the PORTSPEC or
+	       the FILTER options are required.
+	  -f FILTER:
+	       Explicit BPF filter to use to verify receipt of monitored traffic
+	       on interfaces. This can be used instead of '-p' option to specify
+	       a more complex filter to monitor for target traffic.
+	  -w NUM:
+	       Warning threshold. Return WARNING status when only the
+	       specified number or fewer interfaces see the desired traffic.
+	  -c NUM:
+	       Critical threshold. Return CRITICAL status when only the
+	       specified number or fewer interfaces see the desired traffic.
+	  -d NUM:
+	       Capture duration. Number of seconds to monitor for traffic on each
+	       interface. Defaults to $CAPTURE_DURATION; depending on the flow rate of the
+	       desired traffic it may be required to increase this value.
+	       Be careful not to set this too high as otherwise the check could
+	       time out.
+	  -v:  Enable verbose output. Intended for interactive usage.
+	  -h:  Display this help output.
+
+EOF
+}
+
+# Format error messages on stderr
+print_err() {
+    local msg="$1"
+    echo "$(basename $0) - ERROR: $msg" >&2
+}
+
+# Handle verbose output (also stderr)
+print_verbose()
+{
+    local msg="$1"
+    if [ -n "$VERBOSE" ]; then
+        echo "$msg" >&2
+    fi
+}
+
+# Test for privileges to invoke tcpdump(8). Pray to Cthulu that this works on
+# your platform.
+test_capture_priv() {
+    tcpdump -n -c 1 2>&1 1>/dev/null
+}
+
+# Test for receipt of desired traffic on specified interface.
+test_iface() {
+    local iface="$1"
+    TMPOUT=$(mktemp "${TMPDIR:-/tmp}"/pcap-XXXXXXXX)
+
+    # If something goes wrong grabbing the BPF expression, abort
+    [ -n "$FILTER" ] || FILTER="$(get_bpf)"
+    local STATUS=$?
+    [ $STATUS -eq 0 ] || exit $STATUS
+
+    tcpdump -s 68 -c 1 -ni "$iface" -w $TMPOUT "$FILTER" 2>/dev/null &
+    PID=$!
+    # Grab desired traffic, hopefully
+    sleep $CAPTURE_DURATION
+    # Kill the backgrounded tcpdump(8) if it's waiting for packets that didn't
+    # arrive. This is the failure state for the interface. The '|| :' construct
+    # is used to bypass abort-on-error logic in script (set -e, ERR trap).
+    kill $PID 2>/dev/null || :
+    # Give tcpdump a chance to flush to output file
+    sleep 1
+    # Return status based on whether interesting traffic was captured
+    [ -n "$(tcpdump -nqr $TMPOUT 2>/dev/null)" ]
+}
+
+# Parse script arguments
+while getopts "p:f:w:c:d:vh" optchar; do
+    case $optchar in
+        p)  PORTSPEC="${OPTARG}"        ;;
+        f)  BPF="${OPTARG}"             ;;
+        w)  THRESHOLD_WARN=${OPTARG}    ;;
+        c)  THRESHOLD_CRIT=${OPTARG}    ;;
+        d)  CAPTURE_DURATION=${OPTARG}  ;;
+        v)  VERBOSE=1                   ;;
+        h)  usage; exit 0               ;;
+    esac
+done
+shift $(($OPTIND - 1))
+
+# Check that tcpdump can be invoked with current privileges. The '&& :'
+# construct is used to bypass abort-on-error logic in script (set -e,
+# ERR trap).
+ERR_MSG="$(test_capture_priv)" && :
+if [ $? -ne 0 ]; then
+    echo $SERVICENAME UNKNOWN - $ERR_MSG >&2
+    exit ${STATUS_CODES[UNKNOWN]}
+fi
+
+if [ $# -eq 0 ]; then
+    usage; exit 1
+elif [ -z "$THRESHOLD_WARN" -o -z "$THRESHOLD_CRIT" ]; then
+    print_err "warning and critical thresholds required"
+    usage; exit 1
+elif [ "$THRESHOLD_WARN" -ge ${#@} -o "$THRESHOLD_CRIT" -ge ${#@} ]; then
+    print_err "warning and critical thresholds must be less than number of target interfaces"
+    usage; exit 1
+else
+    # Load positional arguments into interface array
+    TAP_IFACES=($*)
+fi
+
+print_verbose "$(clr_white "Testing ${#TAP_IFACES[@]} interface(s): $(clr_escape "${TAP_IFACES[*]}" $CLR_BOLD $CLR_CYAN)")"
+
+for iface in ${TAP_IFACES[@]}; do
+    if test_iface $iface; then
+        RESULTS_PASS+=("$iface")
+        print_verbose "$(clr_bold "$(clr_green '[*] Interface '${iface}' has specified traffic')")"
+    else
+        RESULTS_FAIL+=("$iface")
+        print_verbose "$(clr_bold "$(clr_red '[!] Interface '${iface}' missing specified traffic')")"
+    fi
+done
+
+# Exit status will be OK unless a threshold is violated
+STATUS="OK"
+if [ ${#RESULTS_PASS[*]} -le $THRESHOLD_WARN ]; then
+    STATUS="WARNING"
+fi
+if [ ${#RESULTS_PASS[*]} -le $THRESHOLD_CRIT ]; then
+    STATUS="CRITICAL"
+fi
+
+printf "%s %s - %d interface(s) with traffic (%s), %d without (%s)\n" \
+    "$SERVICENAME" "$STATUS" "${#RESULTS_PASS[*]}" "${RESULTS_PASS[*]:--}" \
+    "${#RESULTS_FAIL[*]}" "${RESULTS_FAIL[*]:--}"
+exit ${STATUS_CODES["$STATUS"]}
+
