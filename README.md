@@ -26,12 +26,16 @@ issue. Here's an example:
     $ check_nids_interfaces -p 80/tcp -w 7 -c 6 eth6 eth7 eth8 eth9 eth10 eth11 eth12 eth13 
     INTERFACES OK - 8 interface(s) with traffic (eth6 eth7 eth8 eth9 eth10 eth11 eth12 eth13), 0 without (-)
 
+Resulting service check in Nagios web UI:
+
+![Nagios service](doc/images/service_ui.png)
+
 This plugin is also designed so that it may be run manually using the
 `-v' option for verbose output. This makes use of colorized terminal output
 using the [bash_colors][bc] library and is useful when spot checking and
 troubleshooting traffic health interactively.
 
-![Verbose invocation](doc/images/image01.png)
+![Verbose invocation](doc/images/verbose.png)
 
 ## Requirements
 
